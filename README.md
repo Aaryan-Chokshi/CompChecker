@@ -1,6 +1,6 @@
 # Compliance Checker
 
-FastAPI parses policy/regulation documents and supplier specifications, creates row-preserving chunks, generates local Hugging Face embeddings, and stores each chunk as one Qdrant point. OpenAI selects semantic boundaries for prose and compares retrieved evidence. Dash supports uploads, reviews, comparison matrices, and supplier clarification downloads.
+FastAPI parses policy/regulation documents and supplier specifications, creates row-preserving chunks, generates local Hugging Face embeddings, and stores each chunk as one Qdrant point. Groq selects semantic boundaries for prose and compares retrieved evidence. Dash supports uploads, reviews, comparison matrices, and supplier clarification downloads.
 
 ## Run locally
 
@@ -10,7 +10,7 @@ Use Python 3.11:
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-export OPENAI_API_KEY='your-key'
+export GROQ_API_KEY='your-key'
 python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -18,7 +18,7 @@ In another terminal, activate the environment and run `python -m ui.app`. Open [
 
 Upload policies in **Policy Library**, upload a supplier document in **Compliance Check**, select ready documents, optionally enter additional specifications, and run the review. Results contain a comparison matrix and supplier clarification sheet with Markdown, DOCX and PDF downloads. Historical results and downloads are available in **History**.
 
-The backend reads process environment variables; it does not load `.env`. `.env.example` lists supported settings. The UI loads only `UI_*` settings from environment or `.env`. OpenAI credentials remain in the backend.
+The backend reads process environment variables; it does not load `.env`. `.env.example` lists supported settings. The UI loads only `UI_*` settings from environment or `.env`. Groq credentials remain in the backend.
 
 ## Shared ingestion and row boundaries
 
@@ -27,7 +27,7 @@ Both `policy` and `subject` documents use `DocumentService` → `parse_document`
 - CSV/TSV files use the first record as headers. Quoted multiline cells remain in their row. Blank data rows are skipped; duplicate header names remain separate columns.
 - Markdown tables, tab-separated text blocks, DOCX tables, and detected PDF tables become structural row units. Each data row produces exactly one chunk and one vector point, with only its values and column labels. There is no row overlap or indexed table-wide summary.
 - DOCX header flags and conservative recognized header names determine whether the first table row supplies column labels. PDF uses the same conservative recognition. Unknown first rows remain data to avoid discarding requirements.
-- For prose, OpenAI groups contiguous sentence units around independently assessable specifications. The backend verifies complete, ordered coverage without duplicated IDs and reconstructs the original text. Invalid or oversized groups fail explicitly. Rows bypass semantic grouping because their boundaries are fixed.
+- For prose, Groq groups contiguous sentence units around independently assessable specifications. The backend verifies complete, ordered coverage without duplicated IDs and reconstructs the original text. Invalid or oversized groups fail explicitly. Rows bypass semantic grouping because their boundaries are fixed.
 - SQLite and Qdrant share chunk IDs. Payloads include document ID, role, filename, ordinal, source text, page/table/row provenance, structured columns, and embedding model/revision.
 
 Valid uploads transition through `processing` to `ready`; processing failures persist as `failed`. Original files are saved with generated UUID names under `UPLOAD_DIR`. SQLite chunks are committed after indexing succeeds. Failed writes trigger deletion of that document's Qdrant points; cleanup failures are logged and failed documents remain ineligible for review.
@@ -36,7 +36,7 @@ Scanned PDFs and image-only pages require OCR before upload. Table detection wor
 
 ## Local embeddings and storage
 
-On first use, the embedding adapter checks for a complete local checkpoint with `local_files_only=True`. If unavailable and offline mode is disabled, Sentence Transformers downloads and caches it, then runs inference on `EMBEDDING_DEVICE`. Later calls reuse the loaded model. Startup and health checks do not download models or call OpenAI.
+On first use, the embedding adapter checks for a complete local checkpoint with `local_files_only=True`. If unavailable and offline mode is disabled, Sentence Transformers downloads and caches it, then runs inference on `EMBEDDING_DEVICE`. Later calls reuse the loaded model. Startup and health checks do not download models or call Groq.
 
 The default English model, `Alibaba-NLP/gte-large-en-v1.5`, requires `trust_remote_code=True` per its [model card](https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5). Set `EMBEDDING_REVISION` to a commit for reproducibility. Expect substantial model disk/RAM usage. Embeddings are normalized; dimensions are derived from the model. Actual tokenizer length is checked before encoding to prevent truncation. `EMBEDDING_LOCAL_FILES_ONLY=true` forbids downloads and fails explicitly if the checkpoint is missing.
 
@@ -46,7 +46,7 @@ Local Qdrant storage requires one backend worker per path. Set `QDRANT_URL` for 
 
 Every supplier chunk and optional input specification is compared against retrieved evidence from each selected policy. Reverse retrieval also checks every indexed policy chunk against supplier evidence, so obligations omitted from the supplier document remain visible. Queries filter by selected document ID and role.
 
-OpenAI's Responses API returns strict Pydantic [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses), with `store=False`. Review instructions cover units, thresholds, test methods, scope, exceptions, missing evidence and prompt injection. Each matrix row includes:
+Groq's Chat Completions API returns [strict JSON schema outputs](https://console.groq.com/docs/structured-outputs), which the backend validates with Pydantic. The default model is `openai/gpt-oss-120b` hosted by Groq. Review instructions cover units, thresholds, test methods, scope, exceptions, missing evidence and prompt injection. Each matrix row includes:
 
 | Field | Meaning |
 | --- | --- |
@@ -96,8 +96,8 @@ Application errors use `{"error":{"code":"...","message":"..."}}`; invalid reque
 | Setting | Default |
 | --- | --- |
 | `DATABASE_PATH` | `data/compliance.sqlite3` |
-| `OPENAI_API_KEY` | Required for prose chunking and review; process environment only |
-| `OPENAI_MODEL` / `OPENAI_TIMEOUT_SECONDS` | `gpt-4o-mini` / `60` per call; SDK retries disabled |
+| `GROQ_API_KEY` | Required for prose chunking and review; process environment only |
+| `GROQ_MODEL` / `GROQ_TIMEOUT_SECONDS` | `openai/gpt-oss-120b` / `60` per call; SDK retries disabled |
 | `EMBEDDING_MODEL_ID` / `EMBEDDING_DEVICE` | `Alibaba-NLP/gte-large-en-v1.5` / `cpu` |
 | `EMBEDDING_CACHE_DIR` / `EMBEDDING_LOCAL_FILES_ONLY` | `data/models` / `false` |
 | `EMBEDDING_BATCH_SIZE` / `EMBEDDING_REVISION` | `8` / unset |
@@ -123,4 +123,4 @@ python -m ruff check backend ui tests
 python -m ruff format --check backend ui tests
 ```
 
-Tests exercise real temporary SQLite and local Qdrant, mocked embeddings, and OpenAI SDK HTTP responses. They cover shared ingestion, row isolation, formats, agent plan coverage, cache/download behavior, token limits, filtering, citations, bidirectional coverage, matrix scores, failure cleanup/persistence, downloads and Dash callbacks. They do not download weights or make paid OpenAI calls; live inference and evaluation quality need separate verification with configured services.
+Tests exercise real temporary SQLite and local Qdrant, mocked embeddings, and Groq SDK HTTP responses. They cover shared ingestion, row isolation, formats, agent plan coverage, cache/download behavior, token limits, filtering, citations, bidirectional coverage, matrix scores, failure cleanup/persistence, downloads and Dash callbacks. They do not download weights or make paid Groq calls; live inference and evaluation quality need separate verification with configured services.

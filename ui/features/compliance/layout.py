@@ -74,7 +74,7 @@ def check_page(subjects: list[dict], policies: list[dict], last_check=None, clie
                                 className="button primary wide",
                             ),
                             html.P(
-                                "Processing uses local embeddings and OpenAI for chunking and review. Large reviews may take several minutes.",
+                                "Processing uses local embeddings and Groq for chunking and review. Large reviews may take several minutes.",
                                 className="caption",
                             ),
                         ],

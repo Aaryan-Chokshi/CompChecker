@@ -56,7 +56,7 @@ def empty_api():
                     "llm": {
                         "configured": False,
                         "initialized": False,
-                        "model": "gpt-4o-mini",
+                        "model": "openai/gpt-oss-120b",
                     },
                 },
             )
@@ -140,6 +140,7 @@ def test_dash_routes_assets_and_real_callback():
                 {"id": "page-content", "property": "children"},
                 {"id": "api-status", "property": "children"},
                 {"id": "navigation", "property": "children"},
+                {"id": "workflow-status", "property": "children"},
             ],
             "inputs": [
                 {"id": "url", "property": "pathname", "value": "/policies"},
@@ -162,7 +163,7 @@ def test_ui_is_independent_of_backend_and_secrets():
         source = path.read_text()
         assert "from backend" not in source
         assert "import backend" not in source
-    assert "openai_api_key" not in UISettings.model_fields
+    assert "groq_api_key" not in UISettings.model_fields
 
 
 def test_upload_callback_sends_multipart_document_and_refreshes_library():

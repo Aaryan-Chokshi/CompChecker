@@ -9,16 +9,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         # Secrets and configuration are supplied by the process environment.
-        # In particular, OPENAI_API_KEY is never read from a dotenv file.
+        # In particular, GROQ_API_KEY is never read from a dotenv file.
         extra="ignore"
     )
 
     app_name: str = "Compliance Checker"
     log_level: str = "INFO"
     database_path: Path = PROJECT_ROOT / "data/compliance.sqlite3"
-    openai_api_key: SecretStr | None = None
-    openai_model: str = "gpt-4o-mini"
-    openai_timeout_seconds: float = Field(default=60, gt=0)
+    groq_api_key: SecretStr | None = None
+    groq_model: str = "openai/gpt-oss-120b"
+    groq_timeout_seconds: float = Field(default=60, gt=0)
     embedding_model_id: str = "Alibaba-NLP/gte-large-en-v1.5"
     embedding_device: str = "cpu"
     embedding_cache_dir: Path = PROJECT_ROOT / "data/models"
@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     qdrant_timeout_seconds: int = Field(default=10, gt=0)
 
     @field_validator(
-        "openai_api_key",
+        "groq_api_key",
         "qdrant_api_key",
         "qdrant_url",
         "embedding_revision",

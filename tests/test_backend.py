@@ -16,10 +16,12 @@ from backend.features.documents.schemas import DocumentRole, DocumentStatus
 from backend.main import create_app
 
 
-def test_openai_key_is_read_from_process_environment_only(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "process-secret")
+def test_groq_key_is_read_from_process_environment_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "obsolete-secret")
+    monkeypatch.setenv("GROQ_API_KEY", "process-secret")
     settings = Settings(_env_file=None, database_path=tmp_path / "db.sqlite3")
-    assert settings.openai_api_key.get_secret_value() == "process-secret"
+    assert settings.groq_api_key.get_secret_value() == "process-secret"
+    assert "openai_api_key" not in Settings.model_fields
 
 
 def test_imports_do_not_load_embedding_runtime():
@@ -53,7 +55,7 @@ def test_startup_initializes_only_database(api, settings):
 
 
 def test_dependency_status_does_not_initialize_or_expose_credentials(settings, monkeypatch):
-    settings.openai_api_key = SecretStr("test-secret-not-for-ui")
+    settings.groq_api_key = SecretStr("test-secret-not-for-ui")
     app = create_app(settings)
     with TestClient(app) as client:
 
@@ -69,7 +71,7 @@ def test_dependency_status_does_not_initialize_or_expose_credentials(settings, m
         assert response.json()["llm"] == {
             "configured": True,
             "initialized": False,
-            "model": "gpt-4o-mini",
+            "model": "openai/gpt-oss-120b",
         }
         assert "test-secret-not-for-ui" not in response.text
 

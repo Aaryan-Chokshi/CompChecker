@@ -2,7 +2,7 @@ import logging
 
 from backend.core.config import Settings
 from backend.integrations.embeddings.huggingface import HuggingFaceEmbeddings
-from backend.integrations.llm.openai import OpenAILLM
+from backend.integrations.llm.groq import GroqLLM
 from backend.integrations.vector_store.qdrant import QdrantVectorStore
 
 logger = logging.getLogger(__name__)
@@ -15,7 +15,7 @@ class Providers:
         self.settings = settings
         self.embeddings = HuggingFaceEmbeddings(settings)
         self.vector_store = QdrantVectorStore(settings, lambda: self.embeddings.dimension)
-        self.llm = OpenAILLM(settings)
+        self.llm = GroqLLM(settings)
 
     def status(self) -> dict:
         # Inspect state only: no downloads, network probes, or billable requests.
@@ -34,9 +34,9 @@ class Providers:
                 "collection": self.settings.qdrant_collection,
             },
             "llm": {
-                "configured": self.settings.openai_api_key is not None,
+                "configured": self.settings.groq_api_key is not None,
                 "initialized": self.llm.initialized,
-                "model": self.settings.openai_model,
+                "model": self.settings.groq_model,
             },
         }
 

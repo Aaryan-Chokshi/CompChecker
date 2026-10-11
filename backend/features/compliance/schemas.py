@@ -43,7 +43,7 @@ class Citation(BaseModel):
 
 
 class Evaluation(BaseModel):
-    """Strict, required fields for OpenAI structured output."""
+    """Strict, required fields for structured model output."""
 
     model_config = ConfigDict(extra="forbid")
     requirement: str
