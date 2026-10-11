@@ -79,7 +79,10 @@ class AgenticChunker:
             "Prefer one independently assessable specification or obligation per chunk. "
             "Use every ID exactly once, in original order. Do not invent or rewrite text. "
             f"The joined text of each group must be at most {self.settings.chunk_max_chars} characters. "
-            "Return a short topic label for each group.",
+            "Return a short topic label for each group."
+            "Return the adjoining text description of the chunk which can be retrieved later."
+            "Return a clean, directly parsable JSON string."
+            "Do not add any kind of formatting or markdown type casting for the output.",
             json.dumps([{"id": i, "text": unit.text} for i, unit in enumerate(units)]),
             ChunkPlan,
         )
