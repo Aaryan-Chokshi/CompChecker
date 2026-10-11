@@ -1,0 +1,16 @@
+# Python 3.11; shared dependencies for the backend, UI, and verification.
+fastapi>=0.115,<1.0
+uvicorn>=0.34,<1.0
+pydantic>=2.10,<3.0
+pydantic-settings>=2.8,<3.0
+SQLAlchemy>=2.0.38,<3.0
+python-multipart>=0.0.20,<1.0
+dash>=3.0,<4.0
+httpx>=0.28,<1.0
+qdrant-client>=1.13,<2.0
+sentence-transformers>=3.4,<6.0
+transformers>=4.48,<5.0
+torch>=2.2,<3.0
+openai>=1.68,<3.0
+pytest>=8.3,<10.0
+ruff>=0.11,<1.0
