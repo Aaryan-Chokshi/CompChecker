@@ -163,7 +163,7 @@ def test_ui_is_independent_of_backend_and_secrets():
         source = path.read_text()
         assert "from backend" not in source
         assert "import backend" not in source
-    assert "groq_api_key" not in UISettings.model_fields
+    assert "ollama_api_key" not in UISettings.model_fields
 
 
 def test_upload_callback_sends_multipart_document_and_refreshes_library():

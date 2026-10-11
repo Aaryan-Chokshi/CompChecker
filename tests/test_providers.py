@@ -6,7 +6,7 @@ from uuid import uuid4
 import httpx
 import numpy as np
 import pytest
-from groq import Groq
+from ollama import Client
 from pydantic import SecretStr
 from qdrant_client import QdrantClient, models
 
@@ -14,7 +14,7 @@ from backend.core.errors import ProviderError
 from backend.features.compliance.schemas import ComplianceResult, Evaluation
 from backend.features.documents.chunking import ChunkPlan
 from backend.integrations.embeddings.huggingface import HuggingFaceEmbeddings
-from backend.integrations.llm.groq import GroqLLM
+from backend.integrations.llm.ollama import OllamaLLM
 from backend.integrations.vector_store.qdrant import QdrantVectorStore, VectorRecord
 
 
@@ -135,32 +135,26 @@ def test_qdrant_server_mode_does_not_create_local_storage(settings):
         store.close()
 
 
-def response_payload(content, finish_reason="stop", refusal=None):
+def response_payload(content):
     return {
-        "id": "chatcmpl_test",
-        "object": "chat.completion",
-        "created": 1,
-        "model": "openai/gpt-oss-120b",
-        "choices": [
-            {
-                "index": 0,
-                "finish_reason": finish_reason,
-                "message": {"role": "assistant", "content": content, "refusal": refusal},
-            }
-        ],
+        "model": "gpt-oss:20b-cloud",
+        "created_at": "2026-01-01T00:00:00Z",
+        "message": {"role": "assistant", "content": content},
+        "done": True,
+        "done_reason": "stop",
     }
 
 
 def llm_with_transport(settings, handler):
-    settings.groq_api_key = SecretStr("test-key")
+    settings.ollama_api_key = SecretStr("test-key")
 
     def factory(**kwargs):
-        return Groq(**kwargs, http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+        return Client(**kwargs, transport=httpx.MockTransport(handler))
 
-    return GroqLLM(settings, factory)
+    return OllamaLLM(settings, factory)
 
 
-def test_groq_sdk_structured_output_and_shutdown(settings):
+def test_ollama_sdk_structured_output_and_shutdown(settings):
     result = {"summary": "Review needed", "verdict": "needs_review", "findings": []}
     requests = []
 
@@ -176,33 +170,33 @@ def test_groq_sdk_structured_output_and_shutdown(settings):
         )
         assert output.model_dump(mode="json", exclude_defaults=True) == result
         body = json.loads(requests[0].content)
-        assert requests[0].url.host == "api.groq.com"
-        assert requests[0].url.path == "/openai/v1/chat/completions"
-        assert body["model"] == "openai/gpt-oss-120b"
-        assert body["messages"] == [
-            {"role": "system", "content": "Assess provided evidence"},
-            {"role": "user", "content": "Example document"},
-        ]
-        assert body["response_format"]["type"] == "json_schema"
-        assert body["response_format"]["json_schema"]["strict"] is True
-        schema = body["response_format"]["json_schema"]["schema"]
-        assert set(schema["required"]) == set(schema["properties"])
-        assert "default" not in schema["properties"]["comparison_matrix"]
-        assert "store" not in body
+        assert requests[0].url.host == "ollama.com"
+        assert requests[0].url.path == "/api/chat"
+        assert requests[0].headers["authorization"] == "Bearer test-key"
+        assert body["model"] == "gpt-oss:20b-cloud"
+        assert body["messages"][0]["role"] == "system"
+        assert body["messages"][0]["content"].startswith("Assess provided evidence")
+        assert body["messages"][1] == {"role": "user", "content": "Example document"}
+        assert body["format"]["title"] == "ComplianceResult"
+        assert body["stream"] is False
+        assert body["think"] is False
+        assert body["options"]["temperature"] == 0
     finally:
         client = llm._client
         llm.close()
-    assert client.is_closed()
+    assert client._client.is_closed
     assert not llm.initialized
 
 
-def test_groq_missing_key_is_explicit(settings):
+def test_ollama_missing_key_is_explicit(settings):
     factory = Mock()
-    settings.groq_api_key = None
+    settings.ollama_api_key = None
     with pytest.raises(ProviderError) as error:
-        GroqLLM(settings, factory).generate_structured("Instructions", "Document", ComplianceResult)
+        OllamaLLM(settings, factory).generate_structured(
+            "Instructions", "Document", ComplianceResult
+        )
     assert error.value.code == "llm_not_configured"
-    assert "GROQ_API_KEY" in error.value.message
+    assert "OLLAMA_API_KEY" in error.value.message
     factory.assert_not_called()
 
 
@@ -225,7 +219,7 @@ def test_groq_missing_key_is_explicit(settings):
         ),
     ],
 )
-def test_workflow_schemas_roundtrip_through_groq_sdk(settings, schema, value):
+def test_workflow_schemas_roundtrip_through_ollama_sdk(settings, schema, value):
     requests = []
 
     def handler(request):
@@ -240,9 +234,8 @@ def test_workflow_schemas_roundtrip_through_groq_sdk(settings, schema, value):
             )
             == value
         )
-        output_schema = requests[0]["response_format"]["json_schema"]["schema"]
-        assert set(output_schema["required"]) == set(output_schema["properties"])
-        assert output_schema["additionalProperties"] is False
+        output_schema = requests[0]["format"]
+        assert output_schema["title"] == schema.__name__
     finally:
         llm.close()
 
@@ -250,35 +243,28 @@ def test_workflow_schemas_roundtrip_through_groq_sdk(settings, schema, value):
 @pytest.mark.parametrize(
     "failure,code",
     [
-        ("refusal", "llm_refusal"),
         ("timeout", "llm_timeout"),
         ("auth", "llm_auth_failed"),
+        ("payment", "llm_payment_required"),
+        ("model", "llm_model_not_found"),
         ("rate_limit", "llm_rate_limited"),
         ("api", "llm_api_error"),
         ("invalid", "llm_invalid_output"),
-        ("incomplete", "llm_incomplete"),
     ],
 )
-def test_groq_failure_modes(settings, failure, code):
+def test_ollama_failure_modes(settings, failure, code):
     def handler(request):
         if failure == "timeout":
             raise httpx.ReadTimeout("timed out", request=request)
-        if failure in {"api", "auth", "rate_limit"}:
-            status = {"api": 500, "auth": 401, "rate_limit": 429}[failure]
-            return httpx.Response(
-                status,
-                json={
-                    "error": {
-                        "message": "Upstream error",
-                        "type": "invalid_request_error",
-                        "code": "upstream_error",
-                    }
-                },
-            )
-        if failure == "refusal":
-            return httpx.Response(200, json=response_payload(None, refusal="Declined"))
-        if failure == "incomplete":
-            return httpx.Response(200, json=response_payload(None, finish_reason="length"))
+        if failure in {"api", "auth", "payment", "model", "rate_limit"}:
+            status = {
+                "api": 500,
+                "auth": 401,
+                "payment": 402,
+                "model": 404,
+                "rate_limit": 429,
+            }[failure]
+            return httpx.Response(status, json={"error": "Upstream error"})
         return httpx.Response(200, json=response_payload("{}"))
 
     llm = llm_with_transport(settings, handler)
