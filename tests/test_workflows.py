@@ -142,18 +142,36 @@ def test_agentic_prose_is_verbatim_and_table_boundaries_are_atomic(workflow_api)
 
 
 @pytest.mark.parametrize("groups", [[], [[0], [0]], [[1], [0]], [[0]], [[0, 1, 2]]])
-def test_invalid_agent_plans_fail_without_losing_or_inventing_text(settings, groups):
+def test_invalid_agent_plans_fall_back_without_losing_or_inventing_text(settings, groups):
     llm = Mock()
     llm.generate_structured.return_value = ChunkPlan(
         groups=[ChunkGroup(unit_ids=ids, topic="x") for ids in groups]
     )
-    with pytest.raises(ProviderError, match="omitted, duplicated or reordered"):
-        AgenticChunker(llm, settings).chunk(
-            [
-                SourceUnit("First sentence.", {"kind": "prose"}),
-                SourceUnit("Second sentence.", {"kind": "prose"}),
-            ]
-        )
+    chunks = AgenticChunker(llm, settings).chunk(
+        [
+            SourceUnit("First sentence.", {"kind": "prose"}),
+            SourceUnit("Second sentence.", {"kind": "prose"}),
+        ]
+    )
+    assert [chunk.text for chunk in chunks] == ["First sentence.", "Second sentence."]
+    assert all(chunk.provenance["strategy"] == "deterministic_fallback" for chunk in chunks)
+
+
+def test_invalid_agent_plan_does_not_fail_document_upload(workflow_api):
+    workflow_api.app.state.providers.llm.generate_structured = lambda *args: ChunkPlan(groups=[])
+    document = upload(
+        workflow_api,
+        "policy",
+        "policy.txt",
+        b"First requirement. Second requirement.",
+    )
+    chunks = workflow_api.get(f"/api/v1/documents/{document['id']}/chunks").json()
+    assert document["status"] == "ready"
+    assert [chunk["text"] for chunk in chunks] == [
+        "First requirement.",
+        "Second requirement.",
+    ]
+    assert all(chunk["provenance"]["strategy"] == "deterministic_fallback" for chunk in chunks)
 
 
 def test_docx_and_pdf_tables_do_not_duplicate_rows_as_prose():

@@ -106,7 +106,6 @@ class OllamaLLM:
             ) from exc
 
         content = response.message.content
-        print(content)
         if not content:
             raise ProviderError("llm_invalid_output", "Ollama returned no structured result.")
         try:
