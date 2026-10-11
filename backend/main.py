@@ -32,8 +32,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title=settings.app_name,
-        version="0.1.0",
-        description="Application scaffold. Ingestion and evaluation are extension points.",
+        version="0.2.0",
+        description="Local document embeddings, row-preserving ingestion and evidence-based compliance comparison.",
         lifespan=lifespan,
     )
     app.include_router(health_router, prefix="/api/v1")

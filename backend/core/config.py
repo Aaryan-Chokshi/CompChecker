@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     embedding_local_files_only: bool = False
     embedding_batch_size: int = Field(default=8, gt=0)
     embedding_revision: str | None = None
+    upload_dir: Path = PROJECT_ROOT / "data/uploads"
+    max_upload_bytes: int = Field(default=20 * 1024 * 1024, gt=0)
+    max_document_chunks: int = Field(default=1000, ge=1)
+    chunk_max_chars: int = Field(default=3000, ge=100, le=12000)
+    chunk_agent_batch_chars: int = Field(default=18000, ge=1000, le=60000)
+    retrieval_top_k: int = Field(default=5, ge=1, le=20)
     qdrant_path: Path = PROJECT_ROOT / "data/qdrant"
     qdrant_collection: str = "policy_chunks"
     qdrant_url: str | None = None
@@ -42,7 +48,7 @@ class Settings(BaseSettings):
     def blank_as_none(cls, value):
         return None if isinstance(value, str) and not value.strip() else value
 
-    @field_validator("database_path", "embedding_cache_dir", "qdrant_path")
+    @field_validator("database_path", "embedding_cache_dir", "qdrant_path", "upload_dir")
     @classmethod
     def resolve_path(cls, value: Path) -> Path:
         return value if value.is_absolute() else PROJECT_ROOT / value

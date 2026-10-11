@@ -1,6 +1,6 @@
 from dash import dcc, html
 
-from ui.components.common import badge, page_header, workflow_notice
+from ui.components.common import badge, page_header
 
 
 def overview_page(documents: list[dict], checks: list[dict], dependencies: dict):
@@ -15,7 +15,7 @@ def overview_page(documents: list[dict], checks: list[dict], dependencies: dict)
     for key, name in (
         ("database", "Application storage"),
         ("embeddings", "Local embeddings"),
-        ("vector_store", "Policy vector index"),
+        ("vector_store", "Document vector index"),
         ("llm", "Compliance reasoning"),
     ):
         state = dependencies[key]
@@ -41,7 +41,6 @@ def overview_page(documents: list[dict], checks: list[dict], dependencies: dict)
                 "Compliance workspace",
                 "Bring your documents and policies into one review workflow.",
             ),
-            workflow_notice(),
             html.Div(
                 [
                     html.Div(

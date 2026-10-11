@@ -58,6 +58,48 @@ class APIClient:
     def checks(self) -> list[dict]:
         return self._records(self._get("/checks", {"limit": 100}))
 
+    def _post(self, path: str, **kwargs) -> dict:
+        try:
+            with httpx.Client(
+                timeout=self.settings.workflow_timeout_seconds, transport=self.transport
+            ) as client:
+                response = client.post(f"{self.settings.api_base_url}{path}", **kwargs)
+                response.raise_for_status()
+                result = response.json()
+                if not isinstance(result, dict):
+                    raise ValueError("Invalid response")
+                return result
+        except httpx.HTTPStatusError as exc:
+            try:
+                message = exc.response.json()["error"]["message"]
+            except (ValueError, KeyError, TypeError):
+                message = f"The backend returned HTTP {exc.response.status_code}."
+            raise APIUnavailable(str(message)) from exc
+        except httpx.TimeoutException as exc:
+            raise APIUnavailable(
+                "Processing took longer than the UI timeout. Refresh the document library or history to check its status before retrying."
+            ) from exc
+        except httpx.RequestError as exc:
+            raise APIUnavailable("The backend is unavailable. Start the API, then retry.") from exc
+        except ValueError as exc:
+            raise APIUnavailable("The backend returned an unexpected response.") from exc
+
+    def upload(self, filename: str, content: bytes, role: str):
+        return self._post("/documents", files={"file": (filename, content)}, data={"role": role})
+
+    def create_check(self, document_id: str, policy_ids: list[str], specifications: list[str]):
+        return self._post(
+            "/checks",
+            json={
+                "document_id": document_id,
+                "policy_ids": policy_ids,
+                "specifications": specifications,
+            },
+        )
+
+    def clarification_url(self, check_id: str, format: str):
+        return f"{self.settings.api_base_url}/checks/{check_id}/clarifications?format={format}"
+
     @staticmethod
     def _records(result: Any) -> list[dict]:
         if not isinstance(result, list) or any(not isinstance(row, dict) for row in result):

@@ -1,137 +1,119 @@
 # Compliance Checker
 
-A runnable application scaffold for reviewing documents against a policy library. Dash provides the UI, FastAPI owns the API and business logic, SQLite stores application records, and Qdrant stores policy vectors. Embeddings run locally through Hugging Face; LLM requests use OpenAI's API.
+FastAPI parses policy/regulation documents and supplier specifications, creates row-preserving chunks, generates local Hugging Face embeddings, and stores each chunk as one Qdrant point. OpenAI selects semantic boundaries for prose and compares retrieved evidence. Dash supports uploads, reviews, comparison matrices, and supplier clarification downloads.
 
-**This is the first-level scaffold, not an end-to-end compliance checker.** Document ingestion and compliance evaluation are explicit extension points. Their API endpoints return `501 Not Implemented`, and the corresponding UI controls are disabled. No sample findings or successful checks are fabricated.
+## Run locally
 
-## Quick start
-
-Use Python **3.11**. From the project root:
+Use Python 3.11:
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-cp .env.example .env
+export OPENAI_API_KEY='your-key'
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
-On Windows, create the environment with `py -3.11 -m venv .venv`, activate using `.venv\Scripts\Activate.ps1`, and copy the configuration with `Copy-Item .env.example .env`.
+In another terminal, activate the environment and run `python -m ui.app`. Open [the UI](http://127.0.0.1:8050) or [the API documentation](http://127.0.0.1:8000/docs).
 
-Start the backend in one terminal:
+Upload policies in **Policy Library**, upload a supplier document in **Compliance Check**, select ready documents, optionally enter additional specifications, and run the review. Results contain a comparison matrix and supplier clarification sheet with Markdown, DOCX and PDF downloads. Historical results and downloads are available in **History**.
 
-```bash
-python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+The backend reads process environment variables; it does not load `.env`. `.env.example` lists supported settings. The UI loads only `UI_*` settings from environment or `.env`. OpenAI credentials remain in the backend.
+
+## Shared ingestion and row boundaries
+
+Both `policy` and `subject` documents use `DocumentService` → `parse_document` → `AgenticChunker` → local embeddings → Qdrant. Supported inputs are UTF-8 TXT, Markdown, CSV, TSV, DOCX, and text-based PDF.
+
+- CSV/TSV files use the first record as headers. Quoted multiline cells remain in their row. Blank data rows are skipped; duplicate header names remain separate columns.
+- Markdown tables, tab-separated text blocks, DOCX tables, and detected PDF tables become structural row units. Each data row produces exactly one chunk and one vector point, with only its values and column labels. There is no row overlap or indexed table-wide summary.
+- DOCX header flags and conservative recognized header names determine whether the first table row supplies column labels. PDF uses the same conservative recognition. Unknown first rows remain data to avoid discarding requirements.
+- For prose, OpenAI groups contiguous sentence units around independently assessable specifications. The backend verifies complete, ordered coverage without duplicated IDs and reconstructs the original text. Invalid or oversized groups fail explicitly. Rows bypass semantic grouping because their boundaries are fixed.
+- SQLite and Qdrant share chunk IDs. Payloads include document ID, role, filename, ordinal, source text, page/table/row provenance, structured columns, and embedding model/revision.
+
+Valid uploads transition through `processing` to `ready`; processing failures persist as `failed`. Original files are saved with generated UUID names under `UPLOAD_DIR`. SQLite chunks are committed after indexing succeeds. Failed writes trigger deletion of that document's Qdrant points; cleanup failures are logged and failed documents remain ineligible for review.
+
+Scanned PDFs and image-only pages require OCR before upload. Table detection works best with ruled, machine-generated PDFs; unusual or borderless layouts may need CSV/DOCX conversion. Nested DOCX tables and vertically merged cells must be flattened/unmerged. Headers, footers, text boxes and embedded images are not extracted. Oversized rows are rejected rather than split or silently truncated. DOCX expanded-size and PDF page-count guards supplement upload/chunk limits.
+
+## Local embeddings and storage
+
+On first use, the embedding adapter checks for a complete local checkpoint with `local_files_only=True`. If unavailable and offline mode is disabled, Sentence Transformers downloads and caches it, then runs inference on `EMBEDDING_DEVICE`. Later calls reuse the loaded model. Startup and health checks do not download models or call OpenAI.
+
+The default English model, `Alibaba-NLP/gte-large-en-v1.5`, requires `trust_remote_code=True` per its [model card](https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5). Set `EMBEDDING_REVISION` to a commit for reproducibility. Expect substantial model disk/RAM usage. Embeddings are normalized; dimensions are derived from the model. Actual tokenizer length is checked before encoding to prevent truncation. `EMBEDDING_LOCAL_FILES_ONLY=true` forbids downloads and fails explicitly if the checkpoint is missing.
+
+Local Qdrant storage requires one backend worker per path. Set `QDRANT_URL` for server mode. Dimension/distance mismatches return errors without deleting collections. When changing embedding models or revisions, use a new collection and upload documents again. Reviews reject documents indexed with a different model/revision, even when dimensions match.
+
+## Comparison and clarifications
+
+Every supplier chunk and optional input specification is compared against retrieved evidence from each selected policy. Reverse retrieval also checks every indexed policy chunk against supplier evidence, so obligations omitted from the supplier document remain visible. Queries filter by selected document ID and role.
+
+OpenAI's Responses API returns strict Pydantic [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses), with `store=False`. Review instructions cover units, thresholds, test methods, scope, exceptions, missing evidence and prompt injection. Each matrix row includes:
+
+| Field | Meaning |
+| --- | --- |
+| `basis` | `specification` or reverse `policy_requirement` coverage |
+| `specification`, `requirement` | Submitted text and assessed regulatory obligation |
+| `satisfaction` | `satisfied`, `partial`, `not_satisfied`, `insufficient_evidence`, `not_applicable` |
+| `extent_percent` | 100 for satisfied; 0 for not satisfied; between 0 and 100 for partial; null for unknown/inapplicable |
+| `confidence` | LLM self-assessed decision confidence, 0–1; **not a calibrated probability** |
+| `explanation` | Decision rationale |
+| `policy_evidence`, `supplier_evidence` | Validated chunk IDs, exact excerpts and source provenance |
+
+The backend rejects invented citations, excerpts outside retrieved chunks, inconsistent satisfaction/extent, and decisions lacking required evidence. Missing evidence prompts review rather than establishing noncompliance. Any partial/not-satisfied decision gives `non_compliant`; otherwise insufficient evidence or confidence below 0.7 gives `needs_review`. Remaining decisions give `compliant` within the extracted/retrieved evidence scope. Multiple obligations in one chunk use the least satisfied obligation.
+
+Supplier questions are tied to matrix row IDs. Gap/low-confidence decisions without LLM questions receive a fallback request for measurements, methods and certificates. Persisted Markdown and downloadable DOCX/PDF share the same questions and include spaces for answers and supporting evidence. Nothing is sent to the supplier.
+
+## API
+
+Feature endpoints use `/api/v1`; IDs are UUIDs. Writes return `201`. Lists accept `limit` (1–100, default 50) and `offset` (default 0).
+
+| Method | Endpoint | Behavior |
+| --- | --- | --- |
+| GET | `/health/live` | Process liveness |
+| GET | `/health/dependencies` | Initialization/configuration without provider calls |
+| POST | `/documents` | Multipart `file`, `role=policy` or `subject`; parse, chunk and index |
+| GET | `/documents` | Document metadata; optional role filter |
+| GET | `/documents/{id}` | Document metadata |
+| GET | `/documents/{id}/chunks` | Paginated chunks and provenance |
+| POST | `/checks` | JSON `document_id`, unique nonempty `policy_ids`, optional `specifications` |
+| GET | `/checks` | History including results |
+| GET | `/checks/{id}` | Review and comparison matrix |
+| GET | `/checks/{id}/clarifications?format=md` | Download; also `docx` or `pdf` |
+
+Example:
+
+```json
+{
+  "document_id": "00000000-0000-0000-0000-000000000001",
+  "policy_ids": ["00000000-0000-0000-0000-000000000002"],
+  "specifications": ["Tensile strength must be at least 100 MPa."]
+}
 ```
 
-Activate the same environment in a second terminal and start Dash:
+Application errors use `{"error":{"code":"...","message":"..."}}`; invalid requests use FastAPI's `422`. Unsupported/malformed/empty inputs, oversized uploads, wrong roles, non-ready documents and provider failures return explicit errors. Failed checks remain in history without results. Downloads require a completed review.
 
-```bash
-python -m ui.app
-```
+## Configuration
 
-Open [the UI](http://127.0.0.1:8050), [interactive API documentation](http://127.0.0.1:8000/docs), or [the OpenAPI schema](http://127.0.0.1:8000/openapi.json).
-
-Startup requires neither an OpenAI API key nor an embedding model download. SQLite initializes during backend startup. The UI loads real API records, initially empty, and refreshes every 30 seconds or when Refresh is clicked. It remains accessible if the API is down and displays an actionable error.
-
-## Project structure
-
-```text
-backend/
-  main.py                         Application factory, routes, lifespan
-  core/                           Settings, logging, errors, dependency injection
-  db/                             SQLite engine, request sessions, table setup
-  integrations/
-    embeddings/                   Lazy Hugging Face/Sentence Transformers adapter
-    vector_store/                 Local/server Qdrant adapter
-    llm/                          OpenAI structured-output adapter
-  features/
-    documents/                    Policy and subject metadata
-    compliance/                   Check contracts and historical results
-ui/
-  app.py                          Dash factory, navigation and view callback
-  config.py                       UI-only environment settings
-  api/                            HTTP client and API error handling
-  components/                     Shared navigation, tables, badges, empty states
-  features/                       Overview, policy library, checks and history
-  assets/                         Responsive CSS
-tests/                            API, persistence, provider and Dash checks
-data/                             Ignored runtime storage
-requirements.txt                  Shared runtime and verification dependencies
-.env.example                      Configuration template without credentials
-```
-
-Feature routers delegate to services; services use repositories for persistence and provider adapters for future orchestration. Each request receives its own SQLAlchemy session. SQLite foreign keys are enabled. The UI only calls HTTP endpoints and never imports backend modules, accesses SQLite/Qdrant, or reads the OpenAI key into its settings.
-
-## Configuration and storage
-
-Backend settings are loaded through Pydantic Settings from process environment variables. The OpenAI key is read only from `OPENAI_API_KEY`; it is never read from `.env` or `.env.example`. The UI only consumes `UI_*` settings. Relative storage paths resolve against the project root. `.env`, databases, model files, and vector storage are ignored by Git.
-
-| Setting | Default / purpose |
+| Setting | Default |
 | --- | --- |
 | `DATABASE_PATH` | `data/compliance.sqlite3` |
-| `OPENAI_API_KEY` | Process environment variable only; optional at startup and required when invoking the LLM adapter |
-| `OPENAI_MODEL` | `gpt-4o-mini` |
-| `OPENAI_TIMEOUT_SECONDS` | `60`; automatic SDK retries disabled |
-| `EMBEDDING_MODEL_ID` | `Alibaba-NLP/gte-large-en-v1.5` |
-| `EMBEDDING_DEVICE` | `cpu`; set a supported Torch device explicitly for acceleration |
-| `EMBEDDING_CACHE_DIR` | `data/models` |
-| `EMBEDDING_LOCAL_FILES_ONLY` | `false`; set `true` after caching for offline loading |
-| `EMBEDDING_BATCH_SIZE` | `8` |
-| `EMBEDDING_REVISION` | Optional Hugging Face commit ID |
-| `QDRANT_PATH` | `data/qdrant` in persistent local mode |
-| `QDRANT_COLLECTION` | `policy_chunks` |
-| `QDRANT_URL` | Unset; when set, server mode replaces local mode |
-| `QDRANT_API_KEY` | Optional server credential |
+| `OPENAI_API_KEY` | Required for prose chunking and review; process environment only |
+| `OPENAI_MODEL` / `OPENAI_TIMEOUT_SECONDS` | `gpt-4o-mini` / `60` per call; SDK retries disabled |
+| `EMBEDDING_MODEL_ID` / `EMBEDDING_DEVICE` | `Alibaba-NLP/gte-large-en-v1.5` / `cpu` |
+| `EMBEDDING_CACHE_DIR` / `EMBEDDING_LOCAL_FILES_ONLY` | `data/models` / `false` |
+| `EMBEDDING_BATCH_SIZE` / `EMBEDDING_REVISION` | `8` / unset |
+| `UPLOAD_DIR` / `MAX_UPLOAD_BYTES` | `data/uploads` / `20971520` (20 MB) |
+| `MAX_DOCUMENT_CHUNKS` / `CHUNK_MAX_CHARS` | `1000` / `3000` |
+| `CHUNK_AGENT_BATCH_CHARS` / `RETRIEVAL_TOP_K` | `18000` / `5` per document |
+| `QDRANT_PATH` / `QDRANT_COLLECTION` | `data/qdrant` / `policy_chunks` (both roles) |
+| `QDRANT_URL` / `QDRANT_API_KEY` | Unset; URL switches to server mode |
 | `QDRANT_TIMEOUT_SECONDS` | `10` in server mode |
 | `UI_API_BASE_URL` | `http://127.0.0.1:8000/api/v1` |
-| `UI_API_TIMEOUT_SECONDS` | `5` per HTTP request |
-| `UI_HOST`, `UI_PORT`, `UI_DEBUG` | `127.0.0.1`, `8050`, `false` |
+| `UI_API_TIMEOUT_SECONDS` / `UI_WORKFLOW_TIMEOUT_SECONDS` | `5` for reads / `600` for writes |
+| `UI_HOST` / `UI_PORT` / `UI_DEBUG` | `127.0.0.1` / `8050` / `false` |
 
-Use one backend worker in local Qdrant mode: only one process can hold a storage path. `--reload` is for development; omit it for a stable local session. To use a separate Qdrant instance, set `QDRANT_URL=http://127.0.0.1:6333` and provide its API key if required. No Docker service is needed for the default configuration.
+Relative paths resolve from the project root. Runtime data is Git-ignored. Schema initialization adds `document_chunks` without altering existing tables. Old ready documents without chunks require re-upload; historical result JSON remains readable with defaults for new fields.
 
-### Embeddings
-
-The chosen English GTE checkpoint is loaded with `SentenceTransformer(..., trust_remote_code=True)`, following its [Hugging Face model card](https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5). It returns normalized vectors and runs locally, not through a hosted embedding API. The checkpoint has 1024-dimensional embeddings; the adapter derives the dimension from the loaded model rather than hardcoding it.
-
-The first explicit embedding or vector-store operation loads the model and may download model weights and model code. Allow disk space and memory for a large model. Subsequent loads reuse cached artifacts; Hugging Face may additionally use its standard cache for custom model code. `EMBEDDING_LOCAL_FILES_ONLY=true` requires those artifacts to be cached already. A fixed `EMBEDDING_REVISION` can pin weights and custom code to a particular commit.
-
-Qdrant initializes a cosine-distance collection lazily and verifies its vector dimension. A mismatched existing collection raises an explicit error; it is never deleted or recreated automatically. After changing models, use a new collection and reindex even if the new model uses the same dimensions.
-
-### OpenAI
-
-`OpenAILLM.generate_structured(instructions, user_input, response_model)` reads the existing `OPENAI_API_KEY` process variable and calls the Responses API with `gpt-4o-mini`, a Pydantic output schema, and `store=False`, following [OpenAI's structured-output documentation](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses).
-
-The adapter distinguishes missing configuration, API failures, timeouts, refusals, incomplete responses, and invalid structured output. Only explicit adapter invocation contacts OpenAI and can incur API charges. It supplies a provider primitive; the future compliance service must assemble retrieved evidence and evaluation instructions.
-
-All provider adapters initialize lazily. Application shutdown closes initialized clients and releases the model reference. Health endpoints never download models or make upstream requests.
-
-## API contracts
-
-| Method | Endpoint | Scaffold behavior |
-| --- | --- | --- |
-| GET | `/api/v1/health/live` | Process liveness: `{"status":"ok"}` |
-| GET | `/api/v1/health/dependencies` | Configuration and initialization state only; no availability probes |
-| GET | `/api/v1/documents` | SQLite records; optional `role=policy` or `role=subject` |
-| GET | `/api/v1/documents/{document_id}` | Metadata, or `404` for an unknown UUID |
-| POST | `/api/v1/documents` | Multipart `file` + `role`; valid requests return `501` |
-| GET | `/api/v1/checks` | Historical run records from SQLite |
-| GET | `/api/v1/checks/{check_id}` | Run with structured result, or `404` |
-| POST | `/api/v1/checks` | JSON `document_id` + nonempty `policy_ids`; valid requests return `501` |
-
-List endpoints return arrays with `limit` (default 50, maximum 100) and `offset` (default 0), ordered newest first. Empty lists return `[]`. The UI displays at most the latest 100 records per request; Overview counts are counts of loaded records, not database totals.
-
-Identifiers are UUIDs. Document responses include `filename`, `role`, processing `status`, and UTC `created_at`. Run responses include `document_id`, `policy_ids`, run `status`, timestamps, and an optional typed result. Results contain a summary, verdict, and findings with policy references and evidence excerpts. No workflow produces these results in this scaffold.
-
-Application errors use `{"error":{"code":"...","message":"..."}}`. Invalid requests use FastAPI's standard `422` validation response. `501` responses do not write records; multipart parsing may use temporary upload storage managed by FastAPI.
-
-## Extending the scaffold
-
-1. Add a module under `backend/features/<feature>/` with its router, Pydantic schemas, service, and repository/models as needed. Register the router under `/api/v1` in `backend/main.py`; register new models in `backend/db/initialize.py`.
-2. Use `SessionDependency` for request-scoped persistence and `ProviderDependency` for the lazy provider bundle. Services own orchestration; repositories own SQL queries. Future write services should commit deliberately and roll back on failure.
-3. Add a matching UI feature and navigation entry. Extend `ui/api/client.py` with HTTP operations and render through the Dash view callback. Enable existing workflow controls only after the underlying endpoints work.
-4. Add behavior tests. The next ingestion implementation should validate/persist documents, parse and chunk text, embed policies, index vectors, and update statuses. The next compliance implementation should validate ready document references, retrieve policy evidence, generate structured findings, and persist the run/result.
-
-SQLite initialization uses `create_all` for initial tables, not schema migration. Introduce migrations before changing a populated database. Policy references are a JSON snapshot in this initial scaffold; future write workflows must validate policy existence and readiness. Authentication, background job infrastructure, parsing/chunking, indexing orchestration, evaluation, result-detail UI, and production deployment are not implemented.
+Processing is synchronous. Reviews require supplier chunk count × selected policy count plus every policy chunk in LLM calls; large reviews can exceed the UI timeout. Refresh history before retrying. Background jobs, recovery after process interruption, authentication, OCR, calibrated confidence and production deployment are outside this implementation.
 
 ## Verification
 
@@ -141,4 +123,4 @@ python -m ruff check backend ui tests
 python -m ruff format --check backend ui tests
 ```
 
-Tests use temporary SQLite and persistent local Qdrant storage, a mocked embedding model, and the real OpenAI SDK over an HTTP mock transport. They cover lazy startup, persistence across restart, API contracts, provider failure handling and shutdown, Dash navigation, callback execution, disabled controls, and API-unavailable feedback. They do not download a model, use credentials, or make paid calls. Real Hugging Face inference and live OpenAI evaluation require separate opt-in verification once those workflows are implemented.
+Tests exercise real temporary SQLite and local Qdrant, mocked embeddings, and OpenAI SDK HTTP responses. They cover shared ingestion, row isolation, formats, agent plan coverage, cache/download behavior, token limits, filtering, citations, bidirectional coverage, matrix scores, failure cleanup/persistence, downloads and Dash callbacks. They do not download weights or make paid OpenAI calls; live inference and evaluation quality need separate verification with configured services.

@@ -16,6 +16,7 @@ class UISettings(BaseSettings):
 
     api_base_url: str = "http://127.0.0.1:8000/api/v1"
     api_timeout_seconds: float = Field(default=5, gt=0)
+    workflow_timeout_seconds: float = Field(default=600, gt=0)
     host: str = "127.0.0.1"
     port: int = Field(default=8050, ge=1, le=65535)
     debug: bool = False

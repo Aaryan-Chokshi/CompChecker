@@ -38,6 +38,7 @@ h3 { font-size: 16px; margin-bottom: 8px; }
 .muted, .caption { color: var(--muted); }
 .caption { font-size: 12px; margin: 14px 0 0; }
 .notice { padding: 15px 18px; margin-bottom: 25px; border: 1px solid #e7dec8; border-radius: 9px; background: #faf7ed; color: #78623b; font-size: 13px; }
+.notice:empty { display: none; }
 .badge { display: inline-block; border-radius: 20px; padding: 4px 10px; background: #edf0ed; color: #61746b; font-size: 11px; font-weight: 600; white-space: nowrap; }
 .badge.success { background: #e3f0e6; color: #27714e; }
 .badge.warning { background: #f1e7cf; color: #806329; }

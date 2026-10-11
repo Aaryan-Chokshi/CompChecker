@@ -19,16 +19,6 @@ def empty_state(title: str, description: str):
     )
 
 
-def workflow_notice():
-    return html.Div(
-        [
-            badge("Coming next", "warning"),
-            html.Span(" Document ingestion and compliance evaluation are not implemented yet."),
-        ],
-        className="notice",
-    )
-
-
 def records_table(records: list[dict], columns: list[tuple[str, str]]):
     return html.Div(
         html.Table(

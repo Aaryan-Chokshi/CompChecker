@@ -160,3 +160,25 @@ class QdrantVectorStore:
                 self._client.close()
                 self._client = None
             self._collection_ready = False
+
+    def delete_document(self, document_id: str) -> None:
+        with self._lock:
+            self.ensure_collection()
+            try:
+                self._client.delete(
+                    collection_name=self.settings.qdrant_collection,
+                    points_selector=models.FilterSelector(
+                        filter=models.Filter(
+                            must=[
+                                models.FieldCondition(
+                                    key="document_id", match=models.MatchValue(value=document_id)
+                                )
+                            ]
+                        )
+                    ),
+                    wait=True,
+                )
+            except Exception as exc:
+                raise ProviderError(
+                    "vector_delete_failed", "Qdrant could not clean up document vectors."
+                ) from exc

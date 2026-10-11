@@ -5,5 +5,5 @@ from backend.features.documents import models as document_models  # noqa: F401
 
 
 def initialize_database(database: Database) -> None:
-    # Initial scaffold only. Existing schema changes will require migrations.
+    # New chunk storage is additive; existing document/run columns are unchanged.
     Base.metadata.create_all(database.engine)

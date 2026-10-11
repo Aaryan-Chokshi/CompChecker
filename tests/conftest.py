@@ -15,6 +15,7 @@ def settings(tmp_path, monkeypatch):
         database_path=tmp_path / "compliance.sqlite3",
         embedding_cache_dir=tmp_path / "models",
         qdrant_path=tmp_path / "qdrant",
+        upload_dir=tmp_path / "uploads",
         embedding_local_files_only=True,
     )
 

@@ -3,9 +3,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, File, Form, Query, UploadFile
 
-from backend.core.dependencies import SessionDependency
+from backend.core.dependencies import ProviderDependency, SessionDependency
 from backend.features.documents.repository import DocumentRepository
-from backend.features.documents.schemas import DocumentRead, DocumentRole
+from backend.features.documents.schemas import ChunkRead, DocumentRead, DocumentRole
 from backend.features.documents.service import DocumentService
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -29,11 +29,22 @@ def get_document(document_id: UUID, session: SessionDependency):
 @router.post(
     "",
     response_model=DocumentRead,
-    responses={501: {"description": "Document ingestion is not implemented."}},
+    status_code=201,
 )
 def upload_document(
     session: SessionDependency,
+    providers: ProviderDependency,
     file: Annotated[UploadFile, File()],
     role: Annotated[DocumentRole, Form()],
 ):
-    return DocumentService(DocumentRepository(session)).upload(file, role)
+    return DocumentService(DocumentRepository(session), providers).upload(file, role)
+
+
+@router.get("/{document_id}/chunks", response_model=list[ChunkRead])
+def list_chunks(
+    document_id: UUID,
+    session: SessionDependency,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    return DocumentService(DocumentRepository(session)).chunks(document_id, limit, offset)

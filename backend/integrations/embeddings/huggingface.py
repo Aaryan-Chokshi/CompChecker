@@ -27,14 +27,24 @@ class HuggingFaceEmbeddings:
                         from sentence_transformers import SentenceTransformer
 
                         factory = SentenceTransformer
-                    self._model = factory(
-                        self.settings.embedding_model_id,
+                    self.settings.embedding_cache_dir.mkdir(parents=True, exist_ok=True)
+                    options = dict(
                         device=self.settings.embedding_device,
                         cache_folder=str(self.settings.embedding_cache_dir),
                         revision=self.settings.embedding_revision,
-                        local_files_only=self.settings.embedding_local_files_only,
                         trust_remote_code=True,  # Required by the selected GTE model card.
                     )
+                    try:
+                        # Check for a complete, locally loadable checkpoint first.
+                        self._model = factory(
+                            self.settings.embedding_model_id, local_files_only=True, **options
+                        )
+                    except (OSError, ValueError):
+                        if self.settings.embedding_local_files_only:
+                            raise
+                        self._model = factory(
+                            self.settings.embedding_model_id, local_files_only=False, **options
+                        )
                 except Exception as exc:
                     raise ProviderError(
                         "embedding_initialization_failed",
@@ -59,6 +69,17 @@ class HuggingFaceEmbeddings:
             raise ValueError("Embedding inputs must be nonempty strings.")
         with self._lock:
             model = self._get_model()
+            max_length = getattr(model, "max_seq_length", None)
+            tokenizer = getattr(model, "tokenizer", None)
+            if isinstance(max_length, int) and tokenizer is not None:
+                for text in texts:
+                    if len(tokenizer.encode(text, truncation=False)) > max_length:
+                        raise ProviderError(
+                            "embedding_input_too_long",
+                            "A chunk exceeds the embedding model token limit. Shorten the row "
+                            "or reduce CHUNK_MAX_CHARS; content will not be silently truncated.",
+                            422,
+                        )
             try:
                 vectors = model.encode(
                     list(texts),

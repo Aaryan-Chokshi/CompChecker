@@ -11,7 +11,8 @@ from pydantic import SecretStr
 from qdrant_client import QdrantClient, models
 
 from backend.core.errors import ProviderError
-from backend.features.compliance.schemas import ComplianceResult
+from backend.features.compliance.schemas import ComplianceResult, Evaluation
+from backend.features.documents.chunking import ChunkPlan
 from backend.integrations.embeddings.huggingface import HuggingFaceEmbeddings
 from backend.integrations.llm.openai import OpenAILLM
 from backend.integrations.vector_store.qdrant import QdrantVectorStore, VectorRecord
@@ -183,7 +184,7 @@ def test_openai_sdk_structured_output_and_shutdown(settings):
         output = llm.generate_structured(
             "Assess provided evidence", "Example document", ComplianceResult
         )
-        assert output.model_dump(mode="json") == result
+        assert output.model_dump(mode="json", exclude_defaults=True) == result
         body = json.loads(requests[0].content)
         assert requests[0].url.path == "/v1/responses"
         assert body["model"] == "gpt-4o-mini"
@@ -205,6 +206,52 @@ def test_openai_missing_key_is_explicit(settings):
         )
     assert error.value.code == "llm_not_configured"
     factory.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "schema,value",
+    [
+        (ChunkPlan, {"groups": [{"unit_ids": [0], "topic": "Strength"}]}),
+        (
+            Evaluation,
+            {
+                "requirement": "Strength",
+                "satisfaction": "insufficient_evidence",
+                "extent_percent": None,
+                "confidence": 0.5,
+                "explanation": "Certificate missing",
+                "policy_evidence": [],
+                "supplier_evidence": [],
+                "clarification_questions": ["Please provide a certificate."],
+            },
+        ),
+    ],
+)
+def test_workflow_schemas_roundtrip_through_openai_sdk(settings, schema, value):
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json=response_payload(
+                [{"type": "output_text", "text": json.dumps(value), "annotations": []}]
+            ),
+        )
+
+    llm = llm_with_transport(settings, handler)
+    try:
+        assert (
+            llm.generate_structured("Instructions", "Source evidence", schema).model_dump(
+                mode="json"
+            )
+            == value
+        )
+        output_schema = requests[0]["text"]["format"]["schema"]
+        assert set(output_schema["required"]) == set(output_schema["properties"])
+        assert output_schema["additionalProperties"] is False
+    finally:
+        llm.close()
 
 
 @pytest.mark.parametrize(

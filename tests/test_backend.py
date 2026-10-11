@@ -41,6 +41,7 @@ def test_startup_initializes_only_database(api, settings):
     assert set(inspect(api.app.state.database.engine).get_table_names()) == {
         "documents",
         "compliance_runs",
+        "document_chunks",
     }
     assert api.get("/api/v1/health/live").json() == {"status": "ok"}
     providers = api.app.state.providers
@@ -84,7 +85,7 @@ def test_empty_lists_and_missing_records(api, resource):
     assert api.get(f"/api/v1/{resource}?offset=-1").status_code == 422
 
 
-def test_workflow_placeholders_never_write_records(api):
+def test_missing_configuration_persists_failed_ingestion_and_missing_check_is_rejected(api):
     upload = api.post(
         "/api/v1/documents",
         files={"file": ("policy.txt", b"Policy text", "text/plain")},
@@ -94,10 +95,10 @@ def test_workflow_placeholders_never_write_records(api):
         "/api/v1/checks",
         json={"document_id": str(uuid4()), "policy_ids": [str(uuid4())]},
     )
-    for response in (upload, check):
-        assert response.status_code == 501
-        assert response.json()["error"]["code"] == "workflow_not_implemented"
-    assert api.get("/api/v1/documents").json() == []
+    assert upload.status_code == 503
+    assert upload.json()["error"]["code"] == "llm_not_configured"
+    assert check.status_code == 404
+    assert api.get("/api/v1/documents").json()[0]["status"] == "failed"
     assert api.get("/api/v1/checks").json() == []
 
 
@@ -153,7 +154,7 @@ def test_sqlite_round_trip_filtering_and_restart(settings):
         assert len(client.get("/api/v1/documents?limit=1").json()) == 1
         assert client.get(f"/api/v1/documents/{subject_id}").json()["created_at"].endswith("Z")
         check = client.get(f"/api/v1/checks/{check_id}").json()
-        assert check["result"] == result
+        assert all(check["result"][key] == value for key, value in result.items())
         assert check["policy_ids"] == [policy_id]
         assert check["completed_at"].endswith("Z")
 

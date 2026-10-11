@@ -3,7 +3,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.features.documents.models import Document
+from backend.features.documents.models import Document, DocumentChunk
 from backend.features.documents.schemas import DocumentRole
 
 
@@ -20,3 +20,14 @@ class DocumentRepository:
 
     def get(self, document_id: UUID) -> Document | None:
         return self.session.get(Document, str(document_id))
+
+    def chunks(self, document_id: UUID, limit: int = 1000, offset: int = 0):
+        return list(
+            self.session.scalars(
+                select(DocumentChunk)
+                .where(DocumentChunk.document_id == str(document_id))
+                .order_by(DocumentChunk.ordinal)
+                .limit(limit)
+                .offset(offset)
+            )
+        )

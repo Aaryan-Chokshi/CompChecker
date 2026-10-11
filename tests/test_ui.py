@@ -1,3 +1,4 @@
+import base64
 import json
 from pathlib import Path
 
@@ -83,14 +84,14 @@ def test_navigation_and_empty_states(path, expected):
 
 
 @pytest.mark.parametrize("path", ["/policies", "/check"])
-def test_unfinished_workflow_controls_are_disabled(path):
+def test_workflow_controls_are_enabled(path):
     page, _ = render_page(path, empty_api())
     controls = [
         node for node in walk(page) if type(node).__name__ in {"Button", "Upload", "Dropdown"}
     ]
     assert controls
-    assert all(node.disabled is True for node in controls)
-    assert "not implemented yet" in text_content(page)
+    assert all(getattr(node, "disabled", False) is not True for node in controls)
+    assert "not implemented yet" not in text_content(page)
 
 
 def test_api_unavailable_feedback_and_unknown_page():
@@ -144,6 +145,8 @@ def test_dash_routes_assets_and_real_callback():
                 {"id": "url", "property": "pathname", "value": "/policies"},
                 {"id": "refresh-button", "property": "n_clicks", "value": 0},
                 {"id": "refresh-interval", "property": "n_intervals", "value": 0},
+                {"id": "workflow-version", "property": "data", "value": None},
+                {"id": "last-check", "property": "data", "value": None},
             ],
             "state": [],
             "changedPropIds": ["url.pathname"],
@@ -160,3 +163,114 @@ def test_ui_is_independent_of_backend_and_secrets():
         assert "from backend" not in source
         assert "import backend" not in source
     assert "openai_api_key" not in UISettings.model_fields
+
+
+def test_upload_callback_sends_multipart_document_and_refreshes_library():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(
+            201, json={"id": "document", "filename": "policy.csv", "status": "ready"}
+        )
+
+    client = APIClient(UISettings(_env_file=None), httpx.MockTransport(handler))
+    app = create_app(UISettings(_env_file=None), client)
+    output = next(
+        key
+        for key, value in app.callback_map.items()
+        if value["inputs"][0]["id"] == "policy-upload"
+    )
+    response = app.server.test_client().post(
+        "/_dash-update-component",
+        json={
+            "output": output,
+            "outputs": [
+                {"id": "workflow-status", "property": "children"},
+                {"id": "workflow-version", "property": "data"},
+            ],
+            "inputs": [
+                {
+                    "id": "policy-upload",
+                    "property": "contents",
+                    "value": "data:text/csv;base64,"
+                    + base64.b64encode(b"Name,Value\nStrength,100\n").decode(),
+                }
+            ],
+            "state": [{"id": "policy-upload", "property": "filename", "value": "policy.csv"}],
+            "changedPropIds": ["policy-upload.contents"],
+        },
+    )
+    assert response.status_code == 200
+    assert "indexed and ready" in json.dumps(response.json)
+    assert requests[0].url.path.endswith("/documents")
+    assert b"Strength,100" in requests[0].content
+    assert b"policy" in requests[0].content
+
+
+def test_check_callback_submits_specifications_and_persists_result():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(
+            201, json={"id": "check", "status": "completed", "result": {"summary": "Done"}}
+        )
+
+    client = APIClient(UISettings(_env_file=None), httpx.MockTransport(handler))
+    app = create_app(UISettings(_env_file=None), client)
+    output = next(
+        key for key, value in app.callback_map.items() if value["inputs"][0]["id"] == "run-check"
+    )
+    response = app.server.test_client().post(
+        "/_dash-update-component",
+        json={
+            "output": output,
+            "outputs": [
+                {"id": "last-check", "property": "data"},
+                {"id": "workflow-status", "property": "children"},
+            ],
+            "inputs": [{"id": "run-check", "property": "n_clicks", "value": 1}],
+            "state": [
+                {"id": "subject-selection", "property": "value", "value": "supplier"},
+                {"id": "policy-selection", "property": "value", "value": ["policy"]},
+                {
+                    "id": "specifications",
+                    "property": "value",
+                    "value": " Strength >= 100 MPa \n\n Certificate required",
+                },
+            ],
+            "changedPropIds": ["run-check.n_clicks"],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json["response"]["last-check"]["data"]["id"] == "check"
+    assert json.loads(requests[0].content)["specifications"] == [
+        "Strength >= 100 MPa",
+        "Certificate required",
+    ]
+
+
+def test_completed_results_show_download_options_and_confidence():
+    check = {
+        "id": "review",
+        "result": {
+            "verdict": "needs_review",
+            "summary": "Review needed",
+            "comparison_matrix": [
+                {
+                    "specification": "Strength",
+                    "satisfaction": "partial",
+                    "extent_percent": 50,
+                    "confidence": 0.8,
+                    "explanation": "Evidence incomplete",
+                }
+            ],
+            "clarification_markdown": "# Supplier clarification sheet",
+        },
+    }
+    page, _ = render_page("/check", empty_api(), check)
+    content = text_content(page)
+    assert "50%" in content and "80%" in content
+    links = [node for node in walk(page) if type(node).__name__ == "A"]
+    assert {node.children for node in links} >= {"Download MD", "Download DOCX", "Download PDF"}
