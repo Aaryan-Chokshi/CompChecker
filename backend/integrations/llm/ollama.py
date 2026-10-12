@@ -1,8 +1,10 @@
 """Ollama structured output adapter shared by chunking and comparison."""
 
 import json
+import logging
 from collections.abc import Callable
 from threading import RLock
+from time import perf_counter
 from typing import Any, TypeVar
 
 import httpx
@@ -13,6 +15,7 @@ from backend.core.config import Settings
 from backend.core.errors import ProviderError
 
 ResultT = TypeVar("ResultT", bound=BaseModel)
+logger = logging.getLogger(__name__)
 
 
 class OllamaLLM:
@@ -53,6 +56,7 @@ class OllamaLLM:
         schema_instruction = (
             f" Return only JSON matching this schema: {json.dumps(schema, separators=(',', ':'))}"
         )
+        started = perf_counter()
         try:
             response = self._get_client().chat(
                 model=self.settings.ollama_model,
@@ -66,6 +70,12 @@ class OllamaLLM:
                 options={"temperature": 0},
             )
         except httpx.TimeoutException as exc:
+            logger.warning(
+                "Ollama model=%s timed out after %.1fs (%s)",
+                self.settings.ollama_model,
+                perf_counter() - started,
+                type(exc).__name__,
+            )
             raise ProviderError(
                 "llm_timeout",
                 "Ollama timed out. Try again or adjust OLLAMA_TIMEOUT_SECONDS.",
@@ -101,6 +111,12 @@ class OllamaLLM:
                 "Ollama request failed. Check credentials, model access, usage limits, and connectivity.",
             ) from exc
         except (ConnectionError, httpx.HTTPError) as exc:
+            logger.warning(
+                "Ollama model=%s transport failed after %.1fs (%s)",
+                self.settings.ollama_model,
+                perf_counter() - started,
+                type(exc).__name__,
+            )
             raise ProviderError(
                 "llm_api_error", "Could not connect to the Ollama cloud API.", 502
             ) from exc
@@ -111,6 +127,21 @@ class OllamaLLM:
         try:
             return response_model.model_validate_json(content)
         except (ValueError, ValidationError) as exc:
+            # Field locations/types distinguish malformed JSON from missing fields
+            # without logging credentials or the document content in the response.
+            issues = (
+                [(issue["loc"], issue["type"]) for issue in exc.errors(include_input=False)]
+                if isinstance(exc, ValidationError)
+                else type(exc).__name__
+            )
+            logger.warning(
+                "Ollama model=%s returned invalid %s output (done_reason=%s, chars=%s): %s",
+                self.settings.ollama_model,
+                response_model.__name__,
+                getattr(response, "done_reason", None),
+                len(content),
+                issues,
+            )
             raise ProviderError(
                 "llm_invalid_output", "Ollama returned invalid structured output."
             ) from exc

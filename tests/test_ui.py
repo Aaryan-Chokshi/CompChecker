@@ -275,3 +275,35 @@ def test_completed_results_show_download_options_and_confidence():
     assert "50%" in content and "80%" in content
     links = [node for node in walk(page) if type(node).__name__ == "A"]
     assert {node.children for node in links} >= {"Download MD", "Download DOCX", "Download PDF"}
+
+
+def test_empty_reviewer_citations_show_source_candidates_separately():
+    from ui.features.compliance.layout import result_view
+
+    page = result_view(
+        {
+            "id": "review",
+            "result": {
+                "comparison_matrix": [
+                    {
+                        "specification": "Speed",
+                        "satisfaction": "insufficient_evidence",
+                        "confidence": 0.8,
+                        "explanation": "Recovery mode unspecified",
+                        "retrieved_policy_chunks": [
+                            {
+                                "filename": "policy.pdf",
+                                "excerpt": "Speed: 0.05 to 1.0 m/s",
+                            }
+                        ],
+                    }
+                ],
+            },
+        },
+        empty_api(),
+    )
+    content = text_content(page)
+    assert "No citations supplied by the reviewer" in content
+    assert "Source context supplied to reviewer (1)" in content
+    assert "not confirmed supporting citations" in content
+    assert "Speed: 0.05 to 1.0 m/s" in content

@@ -45,9 +45,9 @@ Local Qdrant storage requires one backend worker per path. Set `QDRANT_URL` for 
 
 ## Comparison and clarifications
 
-Every supplier chunk and optional input specification is compared against retrieved evidence from each selected policy. Reverse retrieval also checks every indexed policy chunk against supplier evidence, so obligations omitted from the supplier document remain visible. Queries filter by selected document ID and role.
+Every supplier chunk and optional input specification is compared against retrieved evidence from each selected policy. Reverse retrieval also checks every indexed policy chunk against supplier evidence, so obligations omitted from the supplier document remain visible. Queries filter by selected document ID and role. Retrieval queries are embedded in one batched model operation, and independent comparison tasks are sent to Ollama in bounded groups (up to `COMPARISON_BATCH_SIZE` tasks and `COMPARISON_BATCH_MAX_CHARS` of input per request). Invalid or incomplete batch responses are retried as smaller groups. The backend logs batch progress and elapsed time.
 
-Ollama's chat API returns [structured outputs](https://docs.ollama.com/capabilities/structured-outputs), which the backend validates with Pydantic. The default model is `gpt-oss:20b-cloud` hosted by Ollama. Review instructions cover units, thresholds, test methods, scope, exceptions, missing evidence and prompt injection. Each matrix row includes:
+The backend requests JSON from Ollama's chat API and validates it with Pydantic. [Ollama Cloud does not currently support guaranteed structured outputs](https://docs.ollama.com/capabilities/structured-outputs), so malformed responses may still fail after a single-task retry. The default model is `gpt-oss:20b-cloud` hosted by Ollama. Review instructions cover units, thresholds, test methods, scope, exceptions, missing evidence and prompt injection. Each matrix row includes:
 
 | Field | Meaning |
 | --- | --- |
@@ -59,7 +59,9 @@ Ollama's chat API returns [structured outputs](https://docs.ollama.com/capabilit
 | `explanation` | Decision rationale |
 | `policy_evidence`, `supplier_evidence` | Validated chunk IDs, exact excerpts and source provenance |
 
-The backend rejects invented citations, excerpts outside retrieved chunks, inconsistent satisfaction/extent, and decisions lacking required evidence. Missing evidence prompts review rather than establishing noncompliance. Any partial/not-satisfied decision gives `non_compliant`; otherwise insufficient evidence or confidence below 0.7 gives `needs_review`. Remaining decisions give `compliant` within the extracted/retrieved evidence scope. Multiple obligations in one chunk use the least satisfied obligation.
+The backend rejects invented citations, excerpts outside retrieved chunks, inconsistent satisfaction/extent, and decisions lacking required evidence. A reverse policy review must cite the policy requirement even when supplier evidence is insufficient. Invalid single-task responses receive one retry with validation feedback; persistent errors still fail explicitly. Missing evidence prompts review rather than establishing noncompliance. Any partial/not-satisfied decision gives `non_compliant`; otherwise insufficient evidence or confidence below 0.7 gives `needs_review`. Remaining decisions give `compliant` within the extracted/retrieved evidence scope. Multiple obligations in one chunk use the least satisfied obligation.
+
+Completed rows also retain `retrieved_policy_chunks` and `retrieved_supplier_chunks`: the source context sent to the reviewer, independently of its citations. The UI exposes these candidates in expandable details. Candidates are not confirmed evidence supporting a decision. Historical rows default these fields to empty lists. Retrieval fails explicitly if Qdrant returns no points for a document with SQLite chunks, or if returned point IDs cannot be mapped to those chunks.
 
 Supplier questions are tied to matrix row IDs. Gap/low-confidence decisions without LLM questions receive a fallback request for measurements, methods and certificates. Persisted Markdown and downloadable DOCX/PDF share the same questions and include spaces for answers and supporting evidence. Nothing is sent to the supplier.
 
@@ -105,6 +107,7 @@ Application errors use `{"error":{"code":"...","message":"..."}}`; invalid reque
 | `UPLOAD_DIR` / `MAX_UPLOAD_BYTES` | `data/uploads` / `20971520` (20 MB) |
 | `MAX_DOCUMENT_CHUNKS` / `CHUNK_MAX_CHARS` | `1000` / `3000` |
 | `CHUNK_AGENT_BATCH_CHARS` / `RETRIEVAL_TOP_K` | `18000` / `5` per document |
+| `COMPARISON_BATCH_SIZE` / `COMPARISON_BATCH_MAX_CHARS` | `16` tasks / `32000` input characters per Ollama request |
 | `QDRANT_PATH` / `QDRANT_COLLECTION` | `data/qdrant` / `policy_chunks` (both roles) |
 | `QDRANT_URL` / `QDRANT_API_KEY` | Unset; URL switches to server mode |
 | `QDRANT_TIMEOUT_SECONDS` | `10` in server mode |
@@ -114,9 +117,19 @@ Application errors use `{"error":{"code":"...","message":"..."}}`; invalid reque
 
 Relative paths resolve from the project root. Runtime data is Git-ignored. Schema initialization adds `document_chunks` without altering existing tables. Old ready documents without chunks require re-upload; historical result JSON remains readable with defaults for new fields.
 
-Processing is synchronous. Reviews require supplier chunk count × selected policy count plus every policy chunk in LLM calls; large reviews can exceed the UI timeout. Refresh history before retrying. Background jobs, recovery after process interruption, authentication, OCR, calibrated confidence and production deployment are outside this implementation.
+Processing is synchronous. Reviews still evaluate supplier chunk count × selected policy count plus every policy chunk, but the tasks are grouped into fewer Ollama calls. Large reviews can still exceed the UI timeout because the model must generate a result for each task. Refresh history before retrying. Background jobs, recovery after process interruption, authentication, OCR, calibrated confidence and production deployment are outside this implementation.
 
 ## Verification
+
+To audit the latest comparison's vector storage and document filters without loading the embedding model or calling Ollama:
+
+```bash
+python -m scripts.diagnose_retrieval --samples 3
+# Or select a specific pair:
+python -m scripts.diagnose_retrieval --document-id SUBJECT_UUID --policy-id POLICY_UUID
+```
+
+Local storage is queried from a temporary SQLite backup so this audit does not acquire the running backend's Qdrant lock. It compares point IDs and payloads with the document database and runs bidirectional queries using the stored vectors. It does not verify regenerated embeddings or the model's judgment. For server mode, it reads the configured Qdrant service. `LOG_LEVEL=DEBUG` logs retrieved IDs/scores and source-context versus citation counts; failure logs identify the run and error code. Ollama logs transport failure types, elapsed time, and invalid output field locations without logging response text or credentials.
 
 ```bash
 python -m pytest -q

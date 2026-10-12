@@ -14,7 +14,13 @@ from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
 
 from backend.core.errors import ApplicationError, ProviderError
-from backend.features.compliance.schemas import Citation, Evaluation, Satisfaction
+from backend.features.compliance.schemas import (
+    Citation,
+    Evaluation,
+    EvaluationBatch,
+    NumberedEvaluation,
+    Satisfaction,
+)
 from backend.features.documents.chunking import AgenticChunker, ChunkGroup, ChunkPlan
 from backend.features.documents.parsing import SourceUnit, parse_document
 from backend.integrations.embeddings.huggingface import HuggingFaceEmbeddings
@@ -35,6 +41,16 @@ class FakeLLM:
             return ChunkPlan(
                 groups=[ChunkGroup(unit_ids=[unit["id"]], topic="Requirement") for unit in data]
             )
+        if response_model is EvaluationBatch:
+            return EvaluationBatch(
+                evaluations=[
+                    NumberedEvaluation(task_id=task["task_id"], evaluation=self._evaluation(task))
+                    for task in data["tasks"]
+                ]
+            )
+        return self._evaluation(data)
+
+    def _evaluation(self, data):
         policy, supplier = data["policy_chunks"], data["supplier_chunks"]
         status = self.status if policy and supplier else Satisfaction.INSUFFICIENT_EVIDENCE
         extent = {
@@ -242,6 +258,49 @@ def test_comparison_citations_confidence_sheet_and_all_download_formats(workflow
     )
 
 
+def test_comparison_batches_tasks_and_embeds_retrieval_queries_once(workflow_api, settings):
+    settings.comparison_batch_size = 2
+    policy, subject = upload(workflow_api, "policy"), upload(workflow_api, "subject")
+    model = workflow_api.app.state.providers.embeddings._model_factory.return_value
+    encode_calls_before = model.encode.call_count
+
+    response = workflow_api.post(
+        "/api/v1/checks", json={"document_id": subject["id"], "policy_ids": [policy["id"]]}
+    )
+
+    assert response.status_code == 201, response.text
+    assert len(response.json()["result"]["comparison_matrix"]) == 4
+    assert model.encode.call_count == encode_calls_before + 1
+    batch_calls = [
+        data
+        for _, data, response_model in workflow_api.fake_llm.calls
+        if response_model is EvaluationBatch
+    ]
+    assert len(batch_calls) == 2
+    assert [len(batch["tasks"]) for batch in batch_calls] == [2, 2]
+    assert all([task["task_id"] for task in batch["tasks"]] == [0, 1] for batch in batch_calls)
+
+
+def test_incomplete_comparison_batch_retries_as_smaller_batches(workflow_api, settings):
+    settings.comparison_batch_size = 4
+    policy, subject = upload(workflow_api, "policy"), upload(workflow_api, "subject")
+    original = workflow_api.fake_llm.generate_structured
+
+    def incomplete_batch(instructions, user_input, response_model):
+        if response_model is EvaluationBatch and len(json.loads(user_input)["tasks"]) > 1:
+            return EvaluationBatch(evaluations=[])
+        return original(instructions, user_input, response_model)
+
+    workflow_api.app.state.providers.llm.generate_structured = incomplete_batch
+    response = workflow_api.post(
+        "/api/v1/checks", json={"document_id": subject["id"], "policy_ids": [policy["id"]]}
+    )
+
+    assert response.status_code == 201, response.text
+    assert len(response.json()["result"]["comparison_matrix"]) == 4
+    assert len(workflow_api.fake_llm.calls) == 4
+
+
 def test_hallucinated_citation_persists_failed_review(workflow_api):
     policy, subject = upload(workflow_api, "policy"), upload(workflow_api, "subject")
     workflow_api.fake_llm.invalid_citation = True
@@ -412,3 +471,100 @@ def test_nested_and_vertically_merged_docx_tables_fail_explicitly():
         with pytest.raises(ApplicationError) as exc:
             parse_document("merged.docx", stream.getvalue())
         assert exc.value.code == "unsupported_table_layout"
+
+
+@pytest.mark.parametrize("failure", ["missing", "unknown_id"])
+def test_missing_or_inconsistent_vectors_fail_before_ollama(workflow_api, monkeypatch, failure):
+    policy, subject = upload(workflow_api, "policy"), upload(workflow_api, "subject")
+    hits = [] if failure == "missing" else [SimpleNamespace(id=str(uuid4()), score=0.9)]
+    monkeypatch.setattr(
+        workflow_api.app.state.providers.vector_store, "query", lambda *a, **kw: hits
+    )
+    response = workflow_api.post(
+        "/api/v1/checks", json={"document_id": subject["id"], "policy_ids": [policy["id"]]}
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == (
+        "vector_index_missing" if failure == "missing" else "vector_index_inconsistent"
+    )
+    assert not workflow_api.fake_llm.calls
+    assert workflow_api.get("/api/v1/checks").json()[0]["status"] == "failed"
+
+
+def test_retrieved_context_survives_omitted_llm_citations(workflow_api):
+    policy, subject = upload(workflow_api, "policy"), upload(workflow_api, "subject")
+    original = workflow_api.fake_llm.generate_structured
+
+    def omit_specification_citations(instructions, user_input, response_model):
+        result = original(instructions, user_input, response_model)
+        tasks = json.loads(user_input)["tasks"]
+        for task, item in zip(tasks, result.evaluations, strict=True):
+            if task["basis"] == "specification":
+                item.evaluation.satisfaction = Satisfaction.INSUFFICIENT_EVIDENCE
+                item.evaluation.extent_percent = None
+                item.evaluation.policy_evidence = []
+                item.evaluation.supplier_evidence = []
+        return result
+
+    workflow_api.app.state.providers.llm.generate_structured = omit_specification_citations
+    response = workflow_api.post(
+        "/api/v1/checks", json={"document_id": subject["id"], "policy_ids": [policy["id"]]}
+    )
+    assert response.status_code == 201, response.text
+    row = response.json()["result"]["comparison_matrix"][0]
+    assert not row["policy_evidence"] and not row["supplier_evidence"]
+    assert len(row["retrieved_policy_chunks"]) == 2
+    assert len(row["retrieved_supplier_chunks"]) == 1
+    assert {c["document_id"] for c in row["retrieved_policy_chunks"]} == {policy["id"]}
+    assert row["retrieved_supplier_chunks"][0]["document_id"] == subject["id"]
+
+
+def test_policy_requirement_missing_citation_retries_even_for_insufficient_evidence(workflow_api):
+    policy, subject = upload(workflow_api, "policy"), upload(workflow_api, "subject")
+    original = workflow_api.fake_llm.generate_structured
+    feedback = []
+
+    def omit_policy_citation(instructions, user_input, response_model):
+        payload = json.loads(user_input)
+        result = original(instructions, user_input, response_model)
+        for task, item in zip(payload["tasks"], result.evaluations, strict=True):
+            if task["basis"] != "policy_requirement":
+                continue
+            item.evaluation.satisfaction = Satisfaction.INSUFFICIENT_EVIDENCE
+            item.evaluation.extent_percent = None
+            if "validation_feedback" in payload:
+                feedback.append(payload["validation_feedback"])
+            else:
+                item.evaluation.policy_evidence = []
+        return result
+
+    workflow_api.app.state.providers.llm.generate_structured = omit_policy_citation
+    response = workflow_api.post(
+        "/api/v1/checks", json={"document_id": subject["id"], "policy_ids": [policy["id"]]}
+    )
+    assert response.status_code == 201, response.text
+    reverse = [
+        r
+        for r in response.json()["result"]["comparison_matrix"]
+        if r["basis"] == "policy_requirement"
+    ]
+    assert len(reverse) == 2
+    assert all(r["policy_evidence"] for r in reverse)
+    assert len(feedback) == 2
+
+
+def test_retrieval_audit_uses_snapshot_while_backend_holds_qdrant_lock(workflow_api, settings):
+    from scripts.diagnose_retrieval import audit
+
+    policy, subject = upload(workflow_api, "policy"), upload(workflow_api, "subject")
+    model = workflow_api.app.state.providers.embeddings._model_factory.return_value
+    calls = model.encode.call_count
+    report = audit(settings, subject["id"], policy["id"], samples=1)
+    assert report["sqlite_chunks"] == report["qdrant_points"] == 4
+    assert not report["missing_point_ids"]
+    assert not report["orphan_point_ids"]
+    assert not report["payload_mismatches"]
+    assert report["query_counts"] == {"subject: 2 hits": 2, "policy: 2 hits": 2}
+    assert len(report["examples"]) == 1
+    assert model.encode.call_count == calls
+    assert not workflow_api.fake_llm.calls

@@ -56,6 +56,17 @@ class Evaluation(BaseModel):
     clarification_questions: list[str]
 
 
+class NumberedEvaluation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    task_id: int
+    evaluation: Evaluation
+
+
+class EvaluationBatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    evaluations: list[NumberedEvaluation]
+
+
 class EvidenceReference(Citation):
     document_id: str
     filename: str
@@ -76,6 +87,9 @@ class ComparisonRow(BaseModel):
     explanation: str
     policy_evidence: list[EvidenceReference]
     supplier_evidence: list[EvidenceReference]
+    # Search candidates are source context, independently of the LLM's citations.
+    retrieved_policy_chunks: list[EvidenceReference] = Field(default_factory=list)
+    retrieved_supplier_chunks: list[EvidenceReference] = Field(default_factory=list)
 
 
 class ClarificationQuestion(BaseModel):

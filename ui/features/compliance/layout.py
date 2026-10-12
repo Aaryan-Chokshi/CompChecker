@@ -146,6 +146,8 @@ def result_view(check, client):
     rows = result.get("comparison_matrix", [])
 
     def evidence(items):
+        if not items:
+            return html.Span("No citations supplied by the reviewer", className="caption")
         return html.Ul(
             [
                 html.Li(
@@ -158,6 +160,32 @@ def result_view(check, client):
                     title=f"Source chunk: {item.get('chunk_id', '')}",
                 )
                 for item in items
+            ]
+        )
+
+    def evidence_cell(row, source):
+        candidates = row.get(f"retrieved_{source}_chunks", [])
+        return html.Div(
+            [
+                evidence(row.get(f"{source}_evidence", [])),
+                *(
+                    [
+                        html.Details(
+                            [
+                                html.Summary(
+                                    f"Source context supplied to reviewer ({len(candidates)})"
+                                ),
+                                html.P(
+                                    "These are source candidates, not confirmed supporting citations.",
+                                    className="caption",
+                                ),
+                                evidence(candidates),
+                            ]
+                        )
+                    ]
+                    if candidates
+                    else []
+                ),
             ]
         )
 
@@ -207,8 +235,8 @@ def result_view(check, client):
                                         ),
                                         html.Td(f"{row['confidence']:.0%}"),
                                         html.Td(row["explanation"]),
-                                        html.Td(evidence(row.get("policy_evidence", []))),
-                                        html.Td(evidence(row.get("supplier_evidence", []))),
+                                        html.Td(evidence_cell(row, "policy")),
+                                        html.Td(evidence_cell(row, "supplier")),
                                     ]
                                 )
                                 for row in rows

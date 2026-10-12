@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     chunk_max_chars: int = Field(default=3000, ge=100, le=12000)
     chunk_agent_batch_chars: int = Field(default=18000, ge=1000, le=60000)
     retrieval_top_k: int = Field(default=5, ge=1, le=20)
+    comparison_batch_size: int = Field(default=16, ge=1, le=100)
+    comparison_batch_max_chars: int = Field(default=32000, ge=1000, le=120000)
     qdrant_path: Path = PROJECT_ROOT / "data/qdrant"
     qdrant_collection: str = "policy_chunks"
     qdrant_url: str | None = None
